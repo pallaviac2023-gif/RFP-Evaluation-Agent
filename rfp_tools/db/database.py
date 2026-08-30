@@ -7,7 +7,12 @@ Agentic RFP Evaluation project.
 Tables
 ------
 evaluation_criteria : configurable scoring criteria + weights
-rfp_runs            : one row per evaluation batch
+rfp_runs            : one row per evaluation batch, including a
+                       snapshot of the criteria used and any batch-
+                       level warnings, so a completed run can be
+                       reloaded from the database exactly as it was
+                       (see get_full_run_result / "Previous Runs" in
+                       app.py) without depending on session state.
 supplier_results    : one row per supplier per run, including the
                        full validated JSON result for traceability
 """
@@ -53,7 +58,9 @@ CREATE TABLE IF NOT EXISTS evaluation_criteria (
 CREATE TABLE IF NOT EXISTS rfp_runs (
     rfp_run_id      TEXT PRIMARY KEY,   -- UUID string
     created_at      TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'in_progress'  -- in_progress|completed|failed
+    status          TEXT NOT NULL DEFAULT 'in_progress',  -- in_progress|completed|failed
+    criteria_json   TEXT,               -- snapshot of criteria used in this run
+    batch_warnings_json TEXT            -- JSON list of batch-level warnings
 );
 
 CREATE TABLE IF NOT EXISTS supplier_results (
@@ -71,10 +78,23 @@ CREATE TABLE IF NOT EXISTS supplier_results (
 """
 
 
+def _migrate_schema(conn: sqlite3.Connection):
+    """Add columns introduced after the initial release to any
+    pre-existing database file, so upgrading doesn't require deleting
+    rfp_evaluation.db. Safe to call on every startup."""
+    existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(rfp_runs)")}
+    if "criteria_json" not in existing_cols:
+        conn.execute("ALTER TABLE rfp_runs ADD COLUMN criteria_json TEXT")
+    if "batch_warnings_json" not in existing_cols:
+        conn.execute("ALTER TABLE rfp_runs ADD COLUMN batch_warnings_json TEXT")
+
+
 def init_db(db_path: str | Path = DB_PATH):
-    """Create tables if they do not already exist."""
+    """Create tables if they do not already exist, and migrate older
+    database files to the current schema."""
     with get_connection(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate_schema(conn)
 
 
 def seed_default_criteria(db_path: str | Path = DB_PATH):
@@ -169,6 +189,17 @@ def list_runs(db_path: str | Path = DB_PATH) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def list_completed_runs(db_path: str | Path = DB_PATH) -> list[dict]:
+    """Return only completed runs, most recent first. Used by the
+    Previous Runs picker so in-progress/failed batches aren't offered
+    as if they had results to show."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM rfp_runs WHERE status = 'completed' ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 # --------------------------------------------------------------------------
 # Run + result persistence
 # --------------------------------------------------------------------------
@@ -212,6 +243,27 @@ def mark_run_status(rfp_run_id: str, status: str, db_path: str | Path = DB_PATH)
         )
 
 
+def finalize_run(
+    rfp_run_id: str,
+    criteria_used: list[dict],
+    batch_warnings: list[str],
+    status: str = "completed",
+    db_path: str | Path = DB_PATH,
+):
+    """Snapshot the criteria used and any batch-level warnings onto the
+    run row, and mark it complete (or failed). Call this once, at the
+    end of a batch, after all supplier_results rows have been written —
+    it's what makes get_full_run_result() able to reconstruct the run
+    later without session state."""
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """UPDATE rfp_runs
+               SET status = ?, criteria_json = ?, batch_warnings_json = ?
+               WHERE rfp_run_id = ?""",
+            (status, json.dumps(criteria_used), json.dumps(batch_warnings), rfp_run_id),
+        )
+
+
 def get_run_results(rfp_run_id: str, db_path: str | Path = DB_PATH) -> list[dict]:
     with get_connection(db_path) as conn:
         rows = conn.execute(
@@ -224,6 +276,37 @@ def get_run_results(rfp_run_id: str, db_path: str | Path = DB_PATH) -> list[dict
             d["result_json"] = json.loads(d["result_json"])
             results.append(d)
         return results
+
+
+def get_full_run_result(rfp_run_id: str, db_path: str | Path = DB_PATH) -> dict | None:
+    """
+    Reconstruct the same shape of dict that run_batch() returns in
+    memory — {rfp_run_id, leaderboard, criteria_used, batch_warnings} —
+    entirely from SQLite. This is what lets app.py's Leaderboard,
+    Detailed Scorecard, and Run Details tabs render a past run exactly
+    like a freshly-completed one, after a restart or in a new session.
+
+    Returns None if the run_id doesn't exist.
+    """
+    with get_connection(db_path) as conn:
+        run_row = conn.execute(
+            "SELECT * FROM rfp_runs WHERE rfp_run_id = ?", (rfp_run_id,)
+        ).fetchone()
+        if run_row is None:
+            return None
+        run = dict(run_row)
+
+    supplier_rows = get_run_results(rfp_run_id, db_path)
+    leaderboard = [row["result_json"] for row in supplier_rows]
+
+    return {
+        "rfp_run_id": run["rfp_run_id"],
+        "created_at": run["created_at"],
+        "status": run["status"],
+        "leaderboard": leaderboard,
+        "criteria_used": json.loads(run["criteria_json"]) if run["criteria_json"] else [],
+        "batch_warnings": json.loads(run["batch_warnings_json"]) if run["batch_warnings_json"] else [],
+    }
 
 
 if __name__ == "__main__":

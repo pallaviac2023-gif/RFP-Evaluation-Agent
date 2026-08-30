@@ -14,7 +14,10 @@ Pipeline (matches the "Required Architecture and Data Flow" section):
     3. For each supplier: score via LLM (Evaluation Agent)
     4. For each supplier: validate/normalize (Validation Tool)
     5. Score + benchmark + rank the whole batch (Ranking Tool)
-    6. Persist every result under one RFP_RUN_ID
+    6. Persist every result under one RFP_RUN_ID, including a snapshot
+       of the criteria used and any batch-level warnings, so the run
+       can be reloaded later from the database (see "Previous Runs" in
+       app.py / database.get_full_run_result).
 """
 
 from __future__ import annotations
@@ -52,9 +55,14 @@ def run_batch(
     Run the full agentic pipeline for a batch of supplier submissions
     and persist the results under one RFP_RUN_ID.
 
+    api_key is the OpenRouter API key (see tools/evaluation_agent.py),
+    resolved by the caller (app.py) from Streamlit secrets/env — it is
+    passed straight through to evaluate_supplier for each supplier.
+
     Returns a dict with:
         rfp_run_id, leaderboard (ranked results as dicts), any
-        batch-level warnings (e.g. suppliers that failed extraction).
+        batch-level warnings (e.g. suppliers that failed extraction),
+        and criteria_used.
     """
     # --- Step 1: load & validate active criteria ----------------------
     criteria = database.get_active_criteria(db_path)
@@ -117,7 +125,13 @@ def run_batch(
         )
 
     if not validated_inputs:
-        database.mark_run_status(rfp_run_id, "failed", db_path)
+        database.finalize_run(
+            rfp_run_id,
+            criteria_used=criteria,
+            batch_warnings=batch_warnings,
+            status="failed",
+            db_path=db_path,
+        )
         raise OrchestratorError(
             "No suppliers could be evaluated in this batch: " + "; ".join(batch_warnings)
         )
@@ -134,7 +148,13 @@ def run_batch(
     # --- Step 6: Persist --------------------------------------------------
     for r in ranked:
         database.save_supplier_result(rfp_run_id, r.to_dict(), db_path)
-    database.mark_run_status(rfp_run_id, "completed", db_path)
+    database.finalize_run(
+        rfp_run_id,
+        criteria_used=criteria,
+        batch_warnings=batch_warnings,
+        status="completed",
+        db_path=db_path,
+    )
 
     return {
         "rfp_run_id": rfp_run_id,

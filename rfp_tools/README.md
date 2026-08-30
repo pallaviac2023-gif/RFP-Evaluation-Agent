@@ -70,8 +70,7 @@ python db/database.py            # creates + seeds rfp_evaluation.db
 ```
 
 **Set your API key via Streamlit secrets (never through the UI).**
-This app calls Google's Gemini API for the Evaluation Agent — get a
-free key at https://aistudio.google.com/apikey if you don't have one:
+This app calls Anthropic's Claude API for the Evaluation Agent.
 
 ```bash
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml
@@ -82,6 +81,13 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 GitHub. The app reads the key from there automatically — there's no
 API key field in the UI, and the key is never typed into the browser,
 stored in session state, or visible in a screen-recorded demo.
+
+If your key is identity-linked (personal/service account) with access
+to multiple workspaces, Anthropic also requires a workspace ID on
+every request. Simplest fix: when creating the key in the Console
+(Settings → API keys), scope it to a single specific workspace and
+you can skip the workspace-ID secret entirely. Otherwise, uncomment
+and set `ANTHROPIC_WORKSPACE_ID` in `secrets.toml`.
 
 ```bash
 streamlit run app.py
@@ -124,11 +130,11 @@ losing state.
 3. Open the app's **Settings → Secrets** panel in the dashboard and
    paste in:
    ```toml
-   GEMINI_API_KEY = "your-real-gemini-key-here"
+   ANTHROPIC_API_KEY = "sk-ant-your-real-key-here"
    ```
    This is Streamlit Cloud's own encrypted secrets store — it's
    equivalent to the local `secrets.toml` file, and `app.py` reads it
-   the same way (`st.secrets["GEMINI_API_KEY"]`) without any code
+   the same way (`st.secrets["ANTHROPIC_API_KEY"]`) without any code
    changes.
 4. Deploy, then submit the public app URL per the brief's submission
    requirements. Reviewers running your app will need their own key
@@ -175,11 +181,11 @@ parts that run on the standard library:
   errors at parse time).
 
 **Not exercised in this sandbox** (needs `pip install pydantic
-pymupdf streamlit google-genai` and a real `GEMINI_API_KEY`, none
+pymupdf streamlit anthropic` and a real `ANTHROPIC_API_KEY`, none
 available here — no network access): `document_tool.py`'s PyMuPDF
 path (pypdf fallback path is fine), `validation_tool.py`'s Pydantic
-models, `evaluation_agent.py`'s actual Gemini API call, and `app.py`
-at runtime (only syntax-checked with `py_compile`, not run in a live
+models, `evaluation_agent.py`'s actual API call, and `app.py` at
+runtime (only syntax-checked with `py_compile`, not run in a live
 Streamlit server). Install the requirements and set your API key,
 then run `streamlit run app.py` against your four synthetic supplier
 PDFs before recording the demo.

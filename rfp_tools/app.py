@@ -41,16 +41,16 @@ def _resolve_secret(name: str) -> str | None:
 
 def _resolve_api_key() -> str | None:
     """
-    Resolve the Gemini API key from secrets/environment only — it is
+    Resolve the OpenRouter API key from secrets/environment only — it is
     never collected through the UI, so it's never visible in the
     browser, in session state, or in a screen-recorded demo.
 
     Resolution order:
       1. Streamlit secrets: .streamlit/secrets.toml locally, or the
          "Secrets" panel in Streamlit Community Cloud's app settings.
-      2. GEMINI_API_KEY environment variable.
+      2. OPENROUTER_API_KEY environment variable.
     """
-    return _resolve_secret("GEMINI_API_KEY")
+    return _resolve_secret("OPENROUTER_API_KEY")
 
 
 API_KEY = _resolve_api_key()
@@ -77,12 +77,13 @@ with st.sidebar:
     st.title("⚙️ Setup")
 
     if API_KEY:
-        st.success("Gemini API key loaded from secrets.")
+        st.success("OpenRouter API key loaded from secrets.")
     else:
         st.error(
-            "No Gemini API key found. Add `GEMINI_API_KEY` to "
+            "No OpenRouter API key found. Add `OPENROUTER_API_KEY` to "
             "`.streamlit/secrets.toml` locally, or to your app's Secrets "
-            "panel on Streamlit Community Cloud, then restart the app."
+            "panel on Streamlit Community Cloud, then restart the app. "
+            "Get a free key at https://openrouter.ai/keys"
         )
 
     st.caption(f"Database: `{database.DB_PATH.name}`")
@@ -98,8 +99,12 @@ with st.sidebar:
 
     st.divider()
     past_runs = database.list_runs()
+    completed_runs = [r for r in past_runs if r["status"] == "completed"]
     if past_runs:
-        st.caption(f"{len(past_runs)} run(s) stored in this database.")
+        st.caption(
+            f"{len(past_runs)} run(s) stored in this database "
+            f"({len(completed_runs)} completed and browsable in the tabs below)."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -259,7 +264,7 @@ with tab_input:
     if not weights_ok:
         st.error("Cannot run: active criteria weights don't sum to 100%. Fix this on the Criteria tab.")
     if not API_KEY:
-        st.error("Cannot run: no Gemini API key configured (see the sidebar).")
+        st.error("Cannot run: no OpenRouter API key configured (see the sidebar).")
 
     if st.button("▶️ Create batch & Evaluate", type="primary", disabled=not can_run):
         with st.spinner(f"Evaluating {len(submissions_ready)} supplier(s)... this calls the LLM for each one."):
@@ -282,20 +287,52 @@ with tab_input:
 
 # --------------------------------------------------------------------------
 # Shared run picker for the remaining tabs
+#
+# Runs are sourced from two places, merged into one list, most recent
+# first: runs already loaded in this session (st.session_state), and
+# completed runs persisted in SQLite (so a run survives a restart, a
+# redeploy, or opening the app in a new browser tab). Picking a DB-only
+# run lazily fetches and caches it into session state on first view.
 # --------------------------------------------------------------------------
 def _get_selected_run(key_suffix: str) -> dict | None:
-    run_ids = list(st.session_state["run_history"].keys())
+    db_runs = database.list_completed_runs()  # most recent first
+    db_run_ids = [r["rfp_run_id"] for r in db_runs]
+    created_at_by_id = {r["rfp_run_id"]: r["created_at"] for r in db_runs}
+
+    # Union, preserving DB order (most recent first) and appending any
+    # session-only run not yet reflected in the DB query above.
+    run_ids = db_run_ids + [
+        rid for rid in st.session_state["run_history"] if rid not in db_run_ids
+    ]
     if not run_ids:
         return None
+
+    def _label(rid: str) -> str:
+        ts = created_at_by_id.get(rid, "")
+        short_id = rid.split("-")[0]  # first UUID segment, enough to disambiguate
+        return f"{ts} · {short_id}" if ts else short_id
+
     default_idx = (
         run_ids.index(st.session_state["current_run_id"])
         if st.session_state["current_run_id"] in run_ids
         else 0
     )
     selected = st.selectbox(
-        "Run (RFP_RUN_ID)", run_ids, index=default_idx, key=f"run_picker_{key_suffix}"
+        "Run (RFP_RUN_ID)",
+        run_ids,
+        index=default_idx,
+        format_func=_label,
+        key=f"run_picker_{key_suffix}",
     )
     st.session_state["current_run_id"] = selected
+
+    if selected not in st.session_state["run_history"]:
+        loaded = database.get_full_run_result(selected)
+        if loaded is None:
+            st.error(f"Run {selected} could not be loaded from the database.")
+            return None
+        st.session_state["run_history"][selected] = loaded
+
     return st.session_state["run_history"][selected]
 
 
